@@ -1,0 +1,354 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Webpage summarizer'
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: 'S3 bucket name for saving status.'
+
+Resources:
+  # Secret for Basic Auth credentials
+  BasicAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub [ "BasicAuthCreds-${StackName}-${StackId}", {StackName: !Select [1, !Split ['/', !Ref 'AWS::StackId']], StackId: !Select [2, !Split ['/', !Ref 'AWS::StackId']]}]
+      Description: Credentials for Basic Auth
+      SecretString: '{"admin": "REDACTED123"}'
+
+  # IAM Role for Lambda Functions
+  AuthLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref BasicAuthSecret
+
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SummarizerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/api'
+
+  # Extraction Lambda execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource: !Sub 'arn:aws:s3:::${S3BucketName}'
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub 'arn:aws:s3:::${S3BucketName}/*'
+
+
+  # Lambda Function for Basic Auth Authorizer
+  BasicAuthorizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: page-summarizer-auth
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AuthLambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import base64
+          import json
+          import boto3
+          import os
+          from botocore.exceptions import ClientError
+
+          def handler(event, context):
+              # Extract the Authorization header
+              try:
+                  headers = {k.lower(): v for k, v in event['headers'].items()}
+                  auth_header = headers["authorization"]
+                  if not auth_header or not auth_header.startswith('Basic '):
+                      return generate_deny_response('Unauthorized', 'Missing or invalid Authorization header')
+
+                  # Decode the basic auth credentials
+                  encoded_creds = auth_header[6:]  # Remove 'Basic ' prefix
+                  decoded_creds = base64.b64decode(encoded_creds).decode('utf-8')
+                  username, password = decoded_creds.split(':', 1)
+
+                  # Get stored credentials from Secrets Manager
+                  client = boto3.client('secretsmanager')
+                  secret_id=f"BasicAuthCreds-{os.environ['STACK_NAME']}-{os.environ['STACK_ID']}"
+                  response = client.get_secret_value(SecretId=secret_id)
+                  secret = json.loads(response['SecretString'])
+
+                  # Compare credentials
+                  if username in secret and password == secret.get(username):
+                      return generate_allow_response(username)
+                  else:
+                      return generate_deny_response('Unauthorized', 'Invalid credentials')
+
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return generate_deny_response('Unauthorized', 'Authorization error')
+
+          def generate_allow_response(principal_id):
+              return {
+                  'principalId': principal_id,
+                  'policyDocument': {
+                      'Version': '2012-10-17',
+                      'Statement': [{
+                          'Action': 'execute-api:Invoke',
+                          'Effect': 'Allow',
+                          'Resource': '*'
+                      }]
+                  }
+              }
+
+          def generate_deny_response(principal_id, message):
+              return {
+                  'principalId': principal_id,
+                  'policyDocument': {
+                      'Version': '2012-10-17',
+                      'Statement': [{
+                          'Action': 'execute-api:Invoke',
+                          'Effect': 'Deny',
+                          'Resource': '*'
+                      }]
+                  },
+                  'context': {
+                      'message': message
+                  }
+              }
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          STACK_NAME: !Select [1, !Split ['/', !Ref 'AWS::StackId']]
+          STACK_ID: !Select [2, !Split ['/', !Ref 'AWS::StackId']]
+
+  # Lambda function for webpage summarization
+  SummarizerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: webpage-summarizer
+      Description: Summarize webpages
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 2048
+      Timeout: 300
+      Environment:
+        Variables:
+          BUCKET: !Ref S3BucketName
+      PackageType: Image
+      Code:
+        ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/webpage-summarize:latest"
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: SummarizerApi
+      Description: API with Basic Auth
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiGatewayResponse:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      ResponseParameters:
+        gatewayresponse.header.WWW-Authenticate: "'Basic realm=\"Secure API\", charset=\"UTF-8\"'"
+        gatewayresponse.header.Content-Type: "'application/json'"
+      ResponseType: UNAUTHORIZED
+      RestApiId: !Ref ApiGateway
+      StatusCode: '401'
+
+
+  # API Gateway Authorizer using the Lambda Authorizer
+  ApiAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      RestApiId: !Ref ApiGateway
+      Name: BasicAuthAuthorizer
+      Type: REQUEST
+      IdentitySource: method.request.header.Authorization
+      AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BasicAuthorizerFunction.Arn}/invocations
+      AuthorizerResultTtlInSeconds: 300
+
+  # Permission for API Gateway to invoke the Authorizer Lambda
+  AuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt BasicAuthorizerFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/authorizers/${ApiAuthorizer}
+
+  # API Resource
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: 'api'
+
+  # GET Method
+  ApiGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: GET
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SummarizerFunction.Arn}/invocations
+
+  # PUT Method
+  ApiPutMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: PUT
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SummarizerFunction.Arn}/invocations
+
+  # POST Method
+  ApiPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: POST 
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref ApiAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SummarizerFunction.Arn}/invocations
+
+  # CORS configuration for API
+  ApiGatewayCORS:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Credentials: "'false'"
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+        gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        gatewayresponse.header.Access-Control-Allow-Methods: "'GET,PUT,POST,OPTIONS'"
+      ResponseType: DEFAULT_4XX
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayCORS5XX:
+    Type: AWS::ApiGateway::GatewayResponse
+    Properties:
+      ResponseParameters:
+        gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+      ResponseType: DEFAULT_5XX
+      RestApiId: !Ref ApiGateway
+
+  # OPTIONS Method for CORS
+  ApiOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'OPTIONS,GET,PUT,POST'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: '{}'
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+          ResponseModels:
+            application/json: 'Empty'
+
+  # API Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiGetMethod
+      - ApiPostMethod
+      - ApiPutMethod
+      - ApiOptionsMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      Description: 'Deployment for Basic Auth API'
+
+  # API Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref ApiDeployment
+      RestApiId: !Ref ApiGateway
+      StageName: 'prod'
+      Description: 'Production Stage'
+
+Outputs:
+  ApiGatewayUrl:
+    Description: "URL of the API Gateway"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+  
+  ApiEndpoint:
+    Description: "Complete URL for the API endpoint"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/api"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiEndpoint"
+
+  ApiId:
+    Description: "API Gateway ID"
+    Value: !Ref ApiGateway
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiId"
