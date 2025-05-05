@@ -1,4 +1,4 @@
-const defaultApiUrl = "https://zu4ca9gehl.execute-api.us-east-2.amazonaws.com/prod/api";
+const defaultApiUrl = "https://0dhddec7rc.execute-api.us-east-2.amazonaws.com/prod/api"
 const defaultClaudeModel = "claude-3-7-sonnet-latest";
 
 // Saves options to chrome.storage
