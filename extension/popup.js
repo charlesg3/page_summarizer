@@ -98,7 +98,6 @@ async function summarize() {
 
 async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, attempt = 0) {
   try {
-    status(`Processing page${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}...`);
     
     // Make API request
     const response = await makePutRequestWithBasicAuth(apiUrl, user, password, data);
