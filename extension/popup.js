@@ -16,7 +16,7 @@ function init() {
   document.isInitialized = false;
   document.getElementById('summarize').disabled = true;
   status("Loading page information...");
-  
+
   // Get page information
   getPageInfo()
     .then((pageInfo) => {
@@ -24,7 +24,7 @@ function init() {
       document.pageUrl = pageInfo.url;
       document.pageTitle = pageInfo.title;
       document.pageHtml = pageInfo.html;
-      
+
       // Mark as initialized and enable button
       document.isInitialized = true;
       document.getElementById('summarize').disabled = false;
@@ -98,12 +98,13 @@ async function summarize() {
 
 async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, attempt = 0) {
   try {
-    status(`Processing page${attempt > 0 ? ` (attempt ${attempt + 1})` : ''}...`);
     
     // Make API request
     const response = await makePutRequestWithBasicAuth(apiUrl, user, password, data);
     
-    if (response && response.success) {
+    console.log('Lambda response:', response);
+    
+    if (response) {
       // Check if processing is complete
       if (response.summary) {
         // Store the summary in Chrome storage
@@ -118,8 +119,14 @@ async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, 
         
         status('Summary generated!', true);
       } 
-      // If processing is still ongoing
-      else if (response.status === 'processing' || (response.status && response.status.startsWith('summarizing'))) {
+      // If processing is still ongoing - check for any status that indicates processing
+      else if (
+        response.status === 'processing' ||
+        response.status === 'summarizing' ||
+        (response.status && String(response.status).includes('summariz')) ||
+        (response.message && response.message.includes('Processing')) ||
+        (response.message && response.message.includes('processing'))
+      ) {
         status(`Processing page: ${response.status || 'in progress'}...`);
         
         // Poll again after 5 seconds
@@ -127,11 +134,20 @@ async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, 
           pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, attempt + 1);
         }, 5000);
       } 
+      else if (response.success === false) {
+        status('Error: ' + (response.message || 'Failed to generate summary'), true);
+      }
       else {
-        status('Error: ' + (response.message || 'Unknown processing status'), true);
+        // If we can't determine the status but the response exists, assume it's still processing
+        status(`Processing page (status unknown)...`);
+        
+        // Poll again after 5 seconds
+        setTimeout(() => {
+          pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, attempt + 1);
+        }, 5000);
       }
     } else {
-      status('Error: Failed to generate summary', true);
+      status('Error: Failed to generate summary - no response', true);
     }
   } catch (error) {
     console.error('Error during polling:', error);
