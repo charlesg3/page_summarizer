@@ -74,6 +74,22 @@ def check_status_file(page_id: str, mode: str = "default") -> Dict[str, Any]:
         response = s3.get_object(Bucket=bucket, Key=status_key)
         status_data = json.loads(response['Body'].read().decode('utf-8'))
         logger.info(f"Found existing status file for page {page_id} in mode {mode}")
+        
+        # If status is completed and we have an s3_path, generate a fresh presigned URL
+        if status_data.get("status") == "completed" and status_data.get("s3_path"):
+            # Extract the object key from the s3_path
+            s3_path = status_data["s3_path"]
+            if s3_path.startswith(f"s3://{bucket}/"):
+                object_key = s3_path[len(f"s3://{bucket}/"):]
+                # Generate a fresh presigned URL
+                presigned_url = s3.generate_presigned_url(
+                    'get_object',
+                    Params={'Bucket': bucket, 'Key': object_key},
+                    ExpiresIn=604800  # 7 days
+                )
+                status_data["presigned_url"] = presigned_url
+                logger.info(f"Generated fresh presigned URL for {page_id}")
+        
         return status_data
     except Exception as e:
         logger.info(f"No status file found for page {page_id} in mode {mode}: {str(e)}")

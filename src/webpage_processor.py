@@ -23,29 +23,6 @@ logger.setLevel(logging.INFO)
 # Initialize S3 client
 s3_client = boto3.client('s3')
 
-def generate_presigned_url(bucket_name: str, object_name: str, expiration=604800) -> str:
-    """
-    Generate a presigned URL for an S3 object.
-    
-    Args:
-        bucket_name: Name of the S3 bucket
-        object_name: Name of the S3 object
-        expiration: Time in seconds for the presigned URL to remain valid (default 7 days)
-        
-    Returns:
-        Presigned URL as a string or None if error
-    """
-    try:
-        response = s3_client.generate_presigned_url('get_object',
-                                                   Params={'Bucket': bucket_name,
-                                                          'Key': object_name},
-                                                   ExpiresIn=expiration)
-        logger.info(f"Generated presigned URL for {object_name}")
-        return response
-    except ClientError as e:
-        logger.error(f"Error generating presigned URL: {e}")
-        return None
-
 def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default", page_url: str = None, page_title: str = None) -> Dict[str, Any]:
     """
     Save HTML content to S3 bucket.
@@ -59,7 +36,7 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
         page_title: Title of the webpage
         
     Returns:
-        Dictionary with S3 path and presigned URL
+        Dictionary with S3 path
     """
     try:
         # Define the S3 object key based on mode
@@ -194,18 +171,13 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
             ContentType='text/html'
         )
         
-        # Generate a presigned URL with 7-day expiration
-        presigned_url = generate_presigned_url(bucket_name, object_key)
-        
         return {
-            "s3_path": f"s3://{bucket_name}/{object_key}",
-            "presigned_url": presigned_url
+            "s3_path": f"s3://{bucket_name}/{object_key}"
         }
     except Exception as e:
         logger.error(f"Error saving HTML to S3: {str(e)}")
         return {
-            "s3_path": None,
-            "presigned_url": None
+            "s3_path": None
         }
 
 def process_summary_job(
@@ -260,9 +232,8 @@ def process_summary_job(
                 # Save HTML to S3 and get presigned URL
                 s3_result = save_html_to_s3(bucket_name, summary, page_id, mode, page_url, page_title)
                 
-                # Add S3 path and presigned URL to result
+                # Add S3 path to result
                 result["s3_path"] = s3_result["s3_path"]
-                result["presigned_url"] = s3_result["presigned_url"]
                 result["status"] = "completed"
                 result["success"] = True
                 logger.info("Summarization completed successfully")
@@ -288,9 +259,8 @@ def process_summary_job(
                 bucket_name = os.environ.get("BUCKET")
                 s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode, page_url, page_title)
                 
-                # Add S3 path and presigned URL to result
+                # Add S3 path to result
                 result["s3_path"] = s3_result["s3_path"]
-                result["presigned_url"] = s3_result["presigned_url"]
                 
                 # Remove the summary from the result as the frontend uses the presigned URL
                 del result["summary"]
