@@ -177,20 +177,20 @@ def start_async_processing(page_url: str, api_key: str, html_content: Optional[s
             update_status_file(page_id, error_status, mode)
             return error_status
             
-        # Update status to indicate content extraction is complete
+        # Update status to indicate content extraction is complete and store the extracted content
         status["message"] = "Content extracted, starting summarization"
         status["status"] = "summarizing"
+        status["extracted_content"] = extraction_result["content"]
+        status["page_title"] = extraction_result.get("title")
         update_status_file(page_id, status, mode)
         
-        # Prepare payload for async processing
+        # Prepare payload for async processing - don't include the extracted content
         payload = {
             "page_id": page_id,
             "page_url": page_url,
             "api_key": api_key,
             "model": model,
             "mode": mode,
-            "extracted_content": extraction_result["content"],
-            "page_title": extraction_result.get("title"),
             "is_async_job": True
         }
         
@@ -198,22 +198,26 @@ def start_async_processing(page_url: str, api_key: str, html_content: Optional[s
         function_name = context.function_name if context else os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
         logger.info(f"Invoking Lambda function {function_name} asynchronously")
         
-        response = lambda_client.invoke(
-            FunctionName=function_name,
-            InvocationType='Event',  # Asynchronous invocation
-            Payload=json.dumps(payload)
-        )
-        
-        logger.info(f"Async Lambda invocation response: {response}")
-        
-        # Return the current status
-        return {
-            "success": True,
-            "message": "Processing started asynchronously",
-            "page_id": page_id,
-            "page_url": page_url,
-            "status": "summarizing"
-        }
+        try:
+            response = lambda_client.invoke(
+                FunctionName=function_name,
+                InvocationType='Event',  # Asynchronous invocation
+                Payload=json.dumps(payload)
+            )
+            
+            logger.info(f"Async Lambda invocation response: {response}")
+            
+            # Return the current status without the extracted content
+            return {
+                "success": True,
+                "message": "Processing started asynchronously",
+                "page_id": page_id,
+                "page_url": page_url,
+                "status": "summarizing"
+            }
+        except Exception as e:
+            logger.error(f"Error during async Lambda invocation: {str(e)}", exc_info=True)
+            raise
         
     except Exception as e:
         logger.error(f"Error starting async processing: {str(e)}")
@@ -262,8 +266,27 @@ def lambda_handler(event, context):
         api_key = event.get("api_key")
         model = event.get("model", "claude-3-7-sonnet-latest")
         mode = event.get("mode", "default")
-        extracted_content = event.get("extracted_content")
-        page_title = event.get("page_title")
+        
+        # Get the extracted content from the status file
+        status = check_status_file(page_id, mode)
+        if not status:
+            return {
+                "success": False,
+                "message": "Status file not found for async job",
+                "page_id": page_id,
+                "page_url": page_url
+            }
+        
+        extracted_content = status.get("extracted_content")
+        page_title = status.get("page_title")
+        
+        if not extracted_content:
+            return {
+                "success": False,
+                "message": "No extracted content found in status file",
+                "page_id": page_id,
+                "page_url": page_url
+            }
         
         # Process the summary
         result = process_summary_job(
