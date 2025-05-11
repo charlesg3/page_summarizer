@@ -105,17 +105,14 @@ async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, 
     console.log('Lambda response:', response);
     
     if (response) {
-      // Check if processing is complete
-      if (response.summary) {
-        // Store the summary in Chrome storage
-        chrome.storage.local.set({
-          pageSummary: response.summary,
-          pageTitle: pageTitle,
-          pageUrl: pageUrl
-        });
+      // Check if processing is complete and we have a presigned URL
+      if (response.presigned_url) {
+        status('Summary generated! Opening in new tab...');
         
-        // Open the sidebar
-        openSidebar();
+        // Open the presigned URL in a new tab
+        chrome.tabs.create({
+          url: response.presigned_url
+        });
         
         status('Summary generated!', true);
       } 
@@ -164,13 +161,6 @@ async function pollForResults(apiUrl, user, password, data, pageUrl, pageTitle, 
       status('Error: ' + (error.message || 'Failed to summarize page'), true);
     }
   }
-}
-
-function openSidebar() {
-  // Open the sidebar in a new tab
-  chrome.tabs.create({
-    url: chrome.runtime.getURL('sidebar.html')
-  });
 }
 
 async function getPageInfo() {

@@ -9,7 +9,9 @@ import os
 import uuid
 from pathlib import Path
 import time
+import boto3
 from typing import Dict, Any, List
+from botocore.exceptions import ClientError
 
 # Import the summarizer
 from summarizer import summarize_text, chunk_text
@@ -17,6 +19,144 @@ from summarizer import summarize_text, chunk_text
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# Initialize S3 client
+s3_client = boto3.client('s3')
+
+def generate_presigned_url(bucket_name: str, object_name: str, expiration=604800) -> str:
+    """
+    Generate a presigned URL for an S3 object.
+    
+    Args:
+        bucket_name: Name of the S3 bucket
+        object_name: Name of the S3 object
+        expiration: Time in seconds for the presigned URL to remain valid (default 7 days)
+        
+    Returns:
+        Presigned URL as a string or None if error
+    """
+    try:
+        response = s3_client.generate_presigned_url('get_object',
+                                                   Params={'Bucket': bucket_name,
+                                                          'Key': object_name},
+                                                   ExpiresIn=expiration)
+        logger.info(f"Generated presigned URL for {object_name}")
+        return response
+    except ClientError as e:
+        logger.error(f"Error generating presigned URL: {e}")
+        return None
+
+def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default") -> Dict[str, Any]:
+    """
+    Save HTML content to S3 bucket.
+    
+    Args:
+        bucket_name: Name of the S3 bucket
+        html_content: HTML content to save
+        page_id: Unique identifier for the page
+        mode: Summarization mode ("default" or "debate")
+        
+    Returns:
+        Dictionary with S3 path and presigned URL
+    """
+    try:
+        # Create a complete HTML document
+        full_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Summary</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            color: #333;
+        }}
+        h1, h2, h3 {{
+            color: #0066cc;
+        }}
+        h1 {{
+            border-bottom: 2px solid #0066cc;
+            padding-bottom: 10px;
+        }}
+        h2 {{
+            margin-top: 20px;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 5px;
+        }}
+        code {{
+            background-color: #f5f5f5;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: 'Courier New', Courier, monospace;
+        }}
+        pre {{
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }}
+        .tip {{
+            background-color: #e6f7ff;
+            border-left: 4px solid #1890ff;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 0 5px 5px 0;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+        }}
+        th, td {{
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }}
+        th {{
+            background-color: #f2f2f2;
+        }}
+        tr:nth-child(even) {{
+            background-color: #f9f9f9;
+        }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>"""
+        
+        # Define the S3 object key based on mode
+        if mode == "debate":
+            object_key = f"html/analysis/{page_id}.html"
+        else:
+            object_key = f"html/summaries/{page_id}.html"
+        
+        # Upload the HTML to S3
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=object_key,
+            Body=full_html,
+            ContentType='text/html'
+        )
+        
+        # Generate a presigned URL with 7-day expiration
+        presigned_url = generate_presigned_url(bucket_name, object_key)
+        
+        return {
+            "s3_path": f"s3://{bucket_name}/{object_key}",
+            "presigned_url": presigned_url
+        }
+    except Exception as e:
+        logger.error(f"Error saving HTML to S3: {str(e)}")
+        return {
+            "s3_path": None,
+            "presigned_url": None
+        }
 
 def process_summary_job(
     page_id: str,
@@ -62,7 +202,15 @@ def process_summary_job(
             summary = process_single_chunk(text_content, api_key, model, mode)
             
             if summary:
-                result["summary"] = summary
+                # Get S3 bucket name from environment variable
+                bucket_name = os.environ.get("BUCKET")
+                
+                # Save HTML to S3 and get presigned URL
+                s3_result = save_html_to_s3(bucket_name, summary, page_id, mode)
+                
+                # Add S3 path and presigned URL to result
+                result["s3_path"] = s3_result["s3_path"]
+                result["presigned_url"] = s3_result["presigned_url"]
                 result["status"] = "completed"
                 result["success"] = True
                 logger.info("Summarization completed successfully")
@@ -82,6 +230,18 @@ def process_summary_job(
                 mode, 
                 update_status_callback
             )
+            
+            # If processing was successful, save HTML to S3
+            if result.get("success") and result.get("summary"):
+                bucket_name = os.environ.get("BUCKET")
+                s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode)
+                
+                # Add S3 path and presigned URL to result
+                result["s3_path"] = s3_result["s3_path"]
+                result["presigned_url"] = s3_result["presigned_url"]
+                
+                # Remove the summary from the result as the frontend uses the presigned URL
+                del result["summary"]
         
         # Update final status if callback provided
         if update_status_callback:
