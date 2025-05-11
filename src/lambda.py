@@ -174,6 +174,7 @@ def start_async_processing(page_url: str, api_key: str, html_content: Optional[s
             "model": model,
             "mode": mode,
             "extracted_content": extraction_result["content"],
+            "page_title": extraction_result.get("title"),
             "is_async_job": True
         }
         
@@ -246,6 +247,7 @@ def lambda_handler(event, context):
         model = event.get("model", "claude-3-7-sonnet-latest")
         mode = event.get("mode", "default")
         extracted_content = event.get("extracted_content")
+        page_title = event.get("page_title")
         
         # Process the summary
         result = process_summary_job(
@@ -255,6 +257,7 @@ def lambda_handler(event, context):
             api_key=api_key,
             model=model,
             mode=mode,
+            page_title=page_title,
             update_status_callback=lambda pid, status, m: update_status_file(pid, status, m)
         )
         

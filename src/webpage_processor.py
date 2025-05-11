@@ -46,7 +46,7 @@ def generate_presigned_url(bucket_name: str, object_name: str, expiration=604800
         logger.error(f"Error generating presigned URL: {e}")
         return None
 
-def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default", page_url: str = None) -> Dict[str, Any]:
+def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default", page_url: str = None, page_title: str = None) -> Dict[str, Any]:
     """
     Save HTML content to S3 bucket.
     
@@ -56,18 +56,32 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
         page_id: Unique identifier for the page
         mode: Summarization mode ("default" or "debate")
         page_url: Original URL of the page
+        page_title: Title of the webpage
         
     Returns:
         Dictionary with S3 path and presigned URL
     """
     try:
+        # Define the S3 object key based on mode
+        if mode == "debate":
+            object_key = f"html/analysis/{page_id}.html"
+            page_type = "Analysis"
+        else:
+            object_key = f"html/summaries/{page_id}.html"
+            page_type = "Summary"
+            
+        # Use the provided title or extract from URL if not available
+        title = page_title if page_title else (page_url.split('/')[-1] if page_url else page_id)
+        if title.endswith('.html'):
+            title = title[:-5]  # Remove .html extension
+        
         # Create a complete HTML document
         full_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Page Summary</title>
+    <title>{page_type}: {title}</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
@@ -139,19 +153,38 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
         .source-link a:hover {{
             text-decoration: underline;
         }}
+        .page-header {{
+            display: block;
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f0f7ff;
+            border-left: 4px solid #00cc66;
+            font-weight: bold;
+            font-size: 1.2em;
+        }}
+        .page-header a {{
+            color: #00cc66;
+            text-decoration: none;
+        }}
+        .page-header a:hover {{
+            text-decoration: underline;
+        }}
     </style>
+    <script>
+        // Set the permalink to the current URL when the page loads
+        document.addEventListener('DOMContentLoaded', function() {{
+            document.getElementById('permalink').href = window.location.href;
+        }});
+    </script>
 </head>
 <body>
+    <div class="page-header">
+        <a id="permalink" href="#">{page_type}: {title}</a>
+    </div>
     {f'<div class="source-link">Source: <a href="{page_url}" target="_blank">{page_url}</a></div>' if page_url else ''}
     {html_content}
 </body>
 </html>"""
-        
-        # Define the S3 object key based on mode
-        if mode == "debate":
-            object_key = f"html/analysis/{page_id}.html"
-        else:
-            object_key = f"html/summaries/{page_id}.html"
         
         # Upload the HTML to S3
         s3_client.put_object(
@@ -182,6 +215,7 @@ def process_summary_job(
     api_key: str,
     model: str = "claude-3-7-sonnet-latest",
     mode: str = "default",
+    page_title: str = None,
     update_status_callback=None
 ) -> Dict[str, Any]:
     """
@@ -194,6 +228,7 @@ def process_summary_job(
         api_key: Anthropic API key for summarization
         model: Claude model to use for summarization
         mode: Summarization mode ("default" or "debate")
+        page_title: Title of the webpage
         update_status_callback: Function to call to update status
         
     Returns:
@@ -223,7 +258,7 @@ def process_summary_job(
                 bucket_name = os.environ.get("BUCKET")
                 
                 # Save HTML to S3 and get presigned URL
-                s3_result = save_html_to_s3(bucket_name, summary, page_id, mode, page_url)
+                s3_result = save_html_to_s3(bucket_name, summary, page_id, mode, page_url, page_title)
                 
                 # Add S3 path and presigned URL to result
                 result["s3_path"] = s3_result["s3_path"]
@@ -251,7 +286,7 @@ def process_summary_job(
             # If processing was successful, save HTML to S3
             if result.get("success") and result.get("summary"):
                 bucket_name = os.environ.get("BUCKET")
-                s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode, page_url)
+                s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode, page_url, page_title)
                 
                 # Add S3 path and presigned URL to result
                 result["s3_path"] = s3_result["s3_path"]
