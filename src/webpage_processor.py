@@ -46,7 +46,7 @@ def generate_presigned_url(bucket_name: str, object_name: str, expiration=604800
         logger.error(f"Error generating presigned URL: {e}")
         return None
 
-def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default") -> Dict[str, Any]:
+def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str = "default", page_url: str = None) -> Dict[str, Any]:
     """
     Save HTML content to S3 bucket.
     
@@ -55,6 +55,7 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
         html_content: HTML content to save
         page_id: Unique identifier for the page
         mode: Summarization mode ("default" or "debate")
+        page_url: Original URL of the page
         
     Returns:
         Dictionary with S3 path and presigned URL
@@ -123,9 +124,25 @@ def save_html_to_s3(bucket_name: str, html_content: str, page_id: str, mode: str
         tr:nth-child(even) {{
             background-color: #f9f9f9;
         }}
+        .source-link {{
+            display: block;
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f5f5f5;
+            border-left: 4px solid #0066cc;
+            font-weight: bold;
+        }}
+        .source-link a {{
+            color: #0066cc;
+            text-decoration: none;
+        }}
+        .source-link a:hover {{
+            text-decoration: underline;
+        }}
     </style>
 </head>
 <body>
+    {f'<div class="source-link">Source: <a href="{page_url}" target="_blank">{page_url}</a></div>' if page_url else ''}
     {html_content}
 </body>
 </html>"""
@@ -206,7 +223,7 @@ def process_summary_job(
                 bucket_name = os.environ.get("BUCKET")
                 
                 # Save HTML to S3 and get presigned URL
-                s3_result = save_html_to_s3(bucket_name, summary, page_id, mode)
+                s3_result = save_html_to_s3(bucket_name, summary, page_id, mode, page_url)
                 
                 # Add S3 path and presigned URL to result
                 result["s3_path"] = s3_result["s3_path"]
@@ -234,7 +251,7 @@ def process_summary_job(
             # If processing was successful, save HTML to S3
             if result.get("success") and result.get("summary"):
                 bucket_name = os.environ.get("BUCKET")
-                s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode)
+                s3_result = save_html_to_s3(bucket_name, result["summary"], page_id, mode, page_url)
                 
                 # Add S3 path and presigned URL to result
                 result["s3_path"] = s3_result["s3_path"]
